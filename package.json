@@ -1,0 +1,11 @@
+{
+  "name": "sootcase-sheets",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Freight CO2e (GLEC Framework / ISO 14083) in Google Sheets, from the Sootcase API",
+  "license": "MIT",
+  "scripts": {
+    "test": "node test/run.js",
+    "push": "clasp push"
+  }
+}

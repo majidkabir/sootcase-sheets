@@ -1,0 +1,541 @@
+/**
+ * Sootcase for Google Sheets: freight emissions (GLEC Framework / ISO 14083)
+ * from the Sootcase API, as a cell function and for a whole sheet of shipments.
+ *
+ * https://github.com/majidkabir/sootcase-sheets (MIT License)
+ * Calculations: https://sootcase.org (https://github.com/majidkabir/sootcase)
+ */
+
+const SOOTCASE_DEFAULT_URL = 'https://sootcase.org';
+const KEY_PROP = 'SOOTCASE_API_KEY';
+const URL_PROP = 'SOOTCASE_URL';
+const CHUNK = 500;              // shipments per request from SOOTCASE()
+const MAX_SHEET_SHIPMENTS = 10000; // the API's limit per report
+const CACHE_SECONDS = 21600;    // 6 hours, the cache's maximum
+
+const DEFAULT_VEHICLES = {
+  road: 'hgv',
+  rail: 'freight_train',
+  sea: 'container_ship',
+  air: 'air_freight',
+  inland_waterway: 'barge',
+};
+
+const MODE_ALIASES = {
+  truck: 'road', lorry: 'road',
+  train: 'rail',
+  ship: 'sea', ocean: 'sea', vessel: 'sea',
+  plane: 'air', flight: 'air',
+  barge: 'inland_waterway', river: 'inland_waterway', waterway: 'inland_waterway', iww: 'inland_waterway',
+};
+
+const VALUES = {
+  wtw: 'wtw_kg', wtw_kg: 'wtw_kg',
+  ttw: 'ttw_kg', ttw_kg: 'ttw_kg',
+  wtt: 'wtt_kg', wtt_kg: 'wtt_kg',
+  tkm: 'tonne_km', tonne_km: 'tonne_km',
+  intensity: 'intensity_g_per_tkm', intensity_g_per_tkm: 'intensity_g_per_tkm',
+  distance: 'distance_km', distance_km: 'distance_km',
+};
+
+/**
+ * Freight emissions of one transport leg, in kg CO2e well-to-wheel (GLEC Framework / ISO 14083).
+ *
+ * Works on single cells or whole columns: =SOOTCASE(A2:A100, B2:B100, C2:C100, "road").
+ *
+ * @param {string} from Start: a UN/LOCODE (NLRTM), an IATA code (CPH), a place name (Copenhagen) or "lat,lon".
+ * @param {string} to End, the same way.
+ * @param {number} tonnes Cargo weight in tonnes.
+ * @param {string} mode road, rail, sea, air or inland_waterway.
+ * @param {string} vehicle Optional vehicle type, e.g. hgv_artic, freight_train_electric, container_ship. Default per mode.
+ * @param {number} distance_km Optional known distance in km; otherwise Sootcase routes it.
+ * @param {string} value Optional: wtw (default), ttw, wtt, tonne_km, intensity (g CO2e per tonne-km) or distance_km.
+ * @return The value asked for, per row.
+ * @customfunction
+ */
+function SOOTCASE(from, to, tonnes, mode, vehicle, distance_km, value) {
+  const args = [from, to, tonnes, mode, vehicle, distance_km, value];
+  const isRange = args.some(Array.isArray);
+  const rows = isRange ? Math.max(...args.filter(Array.isArray).map((a) => a.length)) : 1;
+  const cell = (arg, i) => (Array.isArray(arg) ? (arg[i] || [])[0] : arg);
+
+  const requests = [];
+  for (let i = 0; i < rows; i++) {
+    const r = args.map((a) => cell(a, i));
+    if (blank_(r[0]) && blank_(r[1]) && blank_(r[2])) {
+      requests.push(null); // empty row in a range
+      continue;
+    }
+    try {
+      requests.push({ input: legInput_(r[0], r[1], r[2], r[3], r[4], r[5]), field: valueField_(r[6]) });
+    } catch (e) {
+      requests.push({ error: e.message });
+    }
+  }
+
+  calculateLegs_(requests);
+
+  const out = requests.map((q) => {
+    if (q === null) return '';
+    if (q.error) {
+      if (!isRange) throw new Error(q.error);
+      return 'Error: ' + q.error;
+    }
+    return q.result[q.field];
+  });
+  return isRange ? out.map((v) => [v]) : out[0];
+}
+
+/** Adds the Sootcase menu. */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Sootcase')
+    .addItem('Calculate shipments on this sheet', 'calculateSheet')
+    .addItem('Insert shipments template', 'insertTemplate')
+    .addSeparator()
+    .addItem('Set my API key…', 'setApiKey')
+    .addItem('Set API key for this spreadsheet…', 'setSpreadsheetApiKey')
+    .addItem('Use another Sootcase server…', 'setServer')
+    .addSeparator()
+    .addItem('About', 'about')
+    .addToUi();
+}
+
+/** For the add-on: show the menu right after installing. */
+function onInstall(e) {
+  onOpen(e);
+}
+
+/**
+ * Calculates the shipments on the active sheet (Sootcase's CSV columns, one row per leg or hub stop)
+ * and writes three sheets: per shipment, per leg, and a summary report.
+ */
+function calculateSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const sheet = ss.getActiveSheet();
+  if ([RESULTS_SHEET, LEGS_SHEET, SUMMARY_SHEET].indexOf(sheet.getName()) >= 0) {
+    ui.alert('Sootcase', 'Open the sheet with your shipments first (not a results sheet).', ui.ButtonSet.OK);
+    return;
+  }
+  const values = sheet.getDataRange().getValues();
+  const header = (values[0] || []).map((h) => String(h).trim().toLowerCase());
+  if (header.indexOf('shipment_id') < 0) {
+    ui.alert('Sootcase',
+      'The first row needs Sootcase\'s column names, at least shipment_id. ' +
+      'Use Sootcase > Insert shipments template to start from an example.', ui.ButtonSet.OK);
+    return;
+  }
+  const rows = values.slice(1).filter((r) => r.some((v) => !blank_(v)));
+  const idCol = header.indexOf('shipment_id');
+  const ids = new Set(rows.map((r) => String(r[idCol])));
+  if (ids.size === 0) {
+    ui.alert('Sootcase', 'There are no shipments below the header row.', ui.ButtonSet.OK);
+    return;
+  }
+  if (ids.size > MAX_SHEET_SHIPMENTS) {
+    ui.alert('Sootcase', 'This sheet has ' + ids.size + ' shipments; one run takes up to ' +
+      MAX_SHEET_SHIPMENTS + '. Split it over several sheets.', ui.ButtonSet.OK);
+    return;
+  }
+
+  ss.toast('Calculating ' + ids.size + ' shipments…', 'Sootcase', -1);
+  const csv = [header].concat(rows).map((r) => r.map(csvCell_).join(',')).join('\n');
+  const q = 'results=true&title=' + encodeURIComponent(sheet.getName());
+  const report = request_('post', '/v1/report?' + q, csv, 'text/csv');
+
+  writeResults_(ss, report);
+  writeLegs_(ss, report);
+  writeSummary_(ss, report, sheet.getName());
+
+  const c = report.coverage || {};
+  ss.toast(c.calculated + ' calculated, ' + (c.failed || 0) + ' failed. Total ' +
+    round_(report.total.wtw_kg / 1000, 3) + ' t CO2e.', 'Sootcase', 10);
+}
+
+/** Inserts a "Shipments" sheet with Sootcase's columns and a few example rows. */
+function insertTemplate() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let name = 'Shipments';
+  for (let n = 2; ss.getSheetByName(name); n++) name = 'Shipments ' + n;
+  const sheet = ss.insertSheet(name);
+  const rows = TEMPLATE_ROWS;
+  sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  sheet.getRange(1, 1, 1, rows[0].length).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+  sheet.autoResizeColumns(1, rows[0].length);
+}
+
+const TEMPLATE_ROWS = [
+  ['shipment_id', 'weight_kg', 'leg_id', 'mode', 'vehicle_type', 'from_code', 'to_code', 'distance_km', 'hub_type'],
+  ['CPH-RTM-1', 12000, 'truck', 'road', 'hgv', 'DKCPH', 'DEHAM', '', ''],
+  ['CPH-RTM-1', '', 'feeder', 'sea', 'container_ship', 'DEHAM', 'NLRTM', '', ''],
+  ['CPH-FRA-AIR', 800, 'flight', 'air', 'air_freight', 'CPH', 'FRA', '', ''],
+  ['HAM-MIL-RAIL', 20000, 'train', 'rail', 'freight_train', 'DEHAM', 'ITMIL', '', ''],
+  ['HAM-MIL-RAIL', '', 'dc', '', '', '', '', '', 'warehouse'],
+];
+
+/** Stores the user's own API key (from sootcase.org). */
+function setApiKey() {
+  promptProperty_(PropertiesService.getUserProperties(), KEY_PROP,
+    'Your Sootcase API key (get one at sootcase.org). Only you can read it. Leave empty to remove it.');
+}
+
+/**
+ * Stores an API key with this spreadsheet. Use it when SOOTCASE() in cells doesn't see your own key;
+ * anyone who can edit the spreadsheet's script can read it.
+ */
+function setSpreadsheetApiKey() {
+  promptProperty_(PropertiesService.getDocumentProperties(), KEY_PROP,
+    'API key for this spreadsheet. Anyone who can edit its script can read it. Leave empty to remove it.');
+}
+
+/** Points the add-in at another Sootcase server, e.g. your own `sootcase serve`. */
+function setServer() {
+  promptProperty_(PropertiesService.getUserProperties(), URL_PROP,
+    'Sootcase server URL (now ' + baseUrl_() + '). Leave empty for ' + SOOTCASE_DEFAULT_URL + '.');
+}
+
+function about() {
+  SpreadsheetApp.getUi().alert('Sootcase for Google Sheets',
+    'Freight emissions following the GLEC Framework v3.3 and ISO 14083, calculated by ' + baseUrl_() + '.\n\n' +
+    'In a cell: =SOOTCASE("Copenhagen", "Hamburg", 12, "road")\n' +
+    'For many shipments: Sootcase > Insert shipments template, fill it, then Calculate.\n\n' +
+    'Results are calculations for your own reporting; Sootcase is not certified against ISO 14083.\n' +
+    'https://github.com/majidkabir/sootcase-sheets',
+    SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+// ---- cell function internals ----
+
+/** Builds a one-leg shipment from SOOTCASE()'s arguments. */
+function legInput_(from, to, tonnes, mode, vehicle, distanceKm) {
+  const t = Number(tonnes);
+  if (blank_(tonnes) || !isFinite(t) || t <= 0) throw new Error('tonnes must be a number above 0');
+  const m = modeOf_(mode);
+  const leg = {
+    mode: m,
+    vehicle_type: blank_(vehicle) ? DEFAULT_VEHICLES[m] : String(vehicle).trim(),
+    from: placeInput_(from, 'from'),
+    to: placeInput_(to, 'to'),
+  };
+  if (!blank_(distanceKm)) {
+    const d = Number(distanceKm);
+    if (!isFinite(d) || d <= 0) throw new Error('distance_km must be a number above 0');
+    leg.distance_km = d;
+  }
+  return { weight_kg: t * 1000, legs: [leg] };
+}
+
+function modeOf_(mode) {
+  if (blank_(mode)) throw new Error('mode is required: road, rail, sea, air or inland_waterway');
+  const m = String(mode).trim().toLowerCase().replace(/[\s-]+/g, '_');
+  const r = MODE_ALIASES[m] || m;
+  if (!DEFAULT_VEHICLES[r]) throw new Error('unknown mode "' + mode + '": use road, rail, sea, air or inland_waterway');
+  return r;
+}
+
+function valueField_(value) {
+  if (blank_(value)) return 'wtw_kg';
+  const f = VALUES[String(value).trim().toLowerCase()];
+  if (!f) throw new Error('unknown value "' + value + '": use wtw, ttw, wtt, tonne_km, intensity or distance_km');
+  return f;
+}
+
+/**
+ * A place as the API takes it: {code} for an upper-case UN/LOCODE or IATA code, {lat, lon} for
+ * "lat,lon", or {name} to look up (resolved in calculateLegs_).
+ */
+function placeInput_(v, which) {
+  if (blank_(v)) throw new Error(which + ' is required');
+  const s = String(v).trim();
+  const ll = s.match(/^(-?\d+(?:\.\d+)?)\s*[,;]\s*(-?\d+(?:\.\d+)?)$/);
+  if (ll) {
+    const lat = Number(ll[1]);
+    const lon = Number(ll[2]);
+    if (Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new Error(which + ': "' + s + '" is not a valid lat,lon');
+    return { lat: lat, lon: lon };
+  }
+  if (/^[A-Z]{2}[A-Z2-9]{3}$/.test(s) || /^[A-Z]{3}$/.test(s)) return { code: s };
+  return { lookup: s };
+}
+
+/** Fills in each request's result (or error), using the cache and as few API calls as possible. */
+function calculateLegs_(requests) {
+  const cache = CacheService.getScriptCache();
+  const todo = requests.filter((q) => q && !q.error);
+
+  // Place names -> coordinates.
+  const names = [];
+  todo.forEach((q) => q.input.legs[0] && ['from', 'to'].forEach((k) => {
+    const p = q.input.legs[0][k];
+    if (p.lookup && names.indexOf(p.lookup) < 0) names.push(p.lookup);
+  }));
+  const places = lookupPlaces_(names, cache);
+  todo.forEach((q) => {
+    ['from', 'to'].forEach((k) => {
+      const p = q.input.legs[0][k];
+      if (!p.lookup) return;
+      const found = places[p.lookup];
+      if (typeof found === 'string') q.error = found;
+      else q.input.legs[0][k] = found;
+    });
+  });
+
+  // Shipments -> results, cached by their input.
+  const pending = [];
+  todo.filter((q) => !q.error).forEach((q) => {
+    q.key = 'calc:' + digest_(JSON.stringify(q.input));
+    const hit = cache.get(q.key);
+    if (hit) q.result = JSON.parse(hit);
+    else pending.push(q);
+  });
+  for (let i = 0; i < pending.length; i += CHUNK) {
+    const part = pending.slice(i, i + CHUNK);
+    const body = { shipments: part.map((q, j) => Object.assign({ id: 'r' + (i + j) }, q.input)) };
+    const res = request_('post', '/v1/calculate/batch', JSON.stringify(body), 'application/json');
+    const store = {};
+    (res.results || []).forEach((item, j) => {
+      const q = part[j];
+      if (item.error) {
+        q.error = item.error;
+        return;
+      }
+      q.result = summary_(item.result);
+      store[q.key] = JSON.stringify(q.result);
+    });
+    if (Object.keys(store).length) cache.putAll(store, CACHE_SECONDS);
+  }
+}
+
+/** The numbers SOOTCASE() can return, from one API result. */
+function summary_(r) {
+  return {
+    wtw_kg: r.wtw_kg,
+    ttw_kg: r.ttw_kg,
+    wtt_kg: r.wtt_kg,
+    tonne_km: r.tonne_km,
+    intensity_g_per_tkm: r.intensity_g_per_tkm,
+    distance_km: (r.legs || []).reduce((s, l) => s + (l.distance_km || 0), 0),
+  };
+}
+
+/** Looks up place names: name -> {name, lat, lon}, or an error message string. */
+function lookupPlaces_(names, cache) {
+  const out = {};
+  const missing = [];
+  names.forEach((n) => {
+    const hit = cache.get('place:' + digest_(n.toLowerCase()));
+    if (hit) out[n] = JSON.parse(hit);
+    else missing.push(n);
+  });
+  if (!missing.length) return out;
+  const reqs = missing.map((n) => ({
+    url: baseUrl_() + '/v1/places?limit=1&q=' + encodeURIComponent(n),
+    method: 'get',
+    headers: headers_(),
+    muteHttpExceptions: true,
+  }));
+  const resps = UrlFetchApp.fetchAll(reqs);
+  const store = {};
+  resps.forEach((resp, i) => {
+    const n = missing[i];
+    const body = parse_(resp);
+    const p = (body.places || [])[0];
+    if (!p) {
+      out[n] = 'no place found for "' + n + '": try a UN/LOCODE (DKCPH) or "lat,lon"';
+      return;
+    }
+    out[n] = { name: p.name + (p.country ? ', ' + p.country : ''), lat: p.lat, lon: p.lon };
+    store['place:' + digest_(n.toLowerCase())] = JSON.stringify(out[n]);
+  });
+  if (Object.keys(store).length) cache.putAll(store, CACHE_SECONDS);
+  return out;
+}
+
+// ---- sheet output ----
+
+const RESULTS_SHEET = 'Sootcase results';
+const LEGS_SHEET = 'Sootcase legs';
+const SUMMARY_SHEET = 'Sootcase summary';
+
+function writeResults_(ss, report) {
+  const rows = [['shipment_id', 'weight_kg', 'legs', 'distance_km', 'tonne_km', 'ttw_kg', 'wtt_kg',
+    'hub_wtw_kg', 'wtw_kg', 'intensity_g_per_tkm', 'primary_data_share', 'error']];
+  (report.results || []).forEach((item) => {
+    const r = item.result;
+    if (!r) {
+      rows.push([item.shipment_id, '', '', '', '', '', '', '', '', '', '', item.error || 'not calculated']);
+      return;
+    }
+    const legs = r.legs || [];
+    const hubs = (r.hubs || []).reduce((s, h) => s + (h.wtw_kg || 0), 0);
+    rows.push([item.shipment_id, r.weight_kg, legs.length,
+      round_(legs.reduce((s, l) => s + (l.distance_km || 0), 0), 1),
+      round_(r.tonne_km, 1), round_(r.ttw_kg, 3), round_(r.wtt_kg, 3), round_(hubs, 3),
+      round_(r.wtw_kg, 3), round_(r.intensity_g_per_tkm, 2), round_(r.primary_data_share, 3), '']);
+  });
+  fillSheet_(ss, RESULTS_SHEET, rows);
+}
+
+function writeLegs_(ss, report) {
+  const rows = [['shipment_id', 'leg_id', 'mode', 'vehicle_type', 'factor_vehicle', 'distance_km',
+    'distance_method', 'distance_type', 'daf', 'method', 'data_type', 'tonne_km', 'ttw_kg', 'wtt_kg',
+    'wtw_kg', 'intensity_g_per_tkm', 'factor_source', 'note']];
+  (report.results || []).forEach((item) => {
+    const r = item.result;
+    if (!r) return;
+    (r.legs || []).forEach((l) => {
+      const f = l.factor || {};
+      const note = [l.added ? 'added road leg (' + l.added + ')' : '', l.note || '', l.factor_note || '']
+        .filter(String).join(' ');
+      rows.push([item.shipment_id, l.leg_id || '', l.mode, l.vehicle_type, f.vehicle_type || '',
+        round_(l.distance_km, 1), l.distance_method || '', l.distance_type || '', l.daf || '',
+        l.method || '', l.data_type || '', round_(l.tonne_km, 1), round_(l.ttw_kg, 3),
+        round_(l.wtt_kg, 3), round_(l.wtw_kg, 3), round_(l.intensity_g_per_tkm, 2), f.source || '', note]);
+    });
+    (r.hubs || []).forEach((h) => {
+      rows.push([item.shipment_id, h.hub_id || '', 'hub', h.hub_type || '', '', '', '', '', '', '',
+        h.data_type || '', '', '', '', round_(h.wtw_kg, 3), '', h.source || '', h.note || '']);
+    });
+  });
+  fillSheet_(ss, LEGS_SHEET, rows);
+}
+
+function writeSummary_(ss, report, sourceName) {
+  const t = report.total || {};
+  const c = report.coverage || {};
+  const dq = report.data_quality || {};
+  const g = report.ghg_protocol || {};
+  const W = 6;
+  const pad = (r) => r.concat(Array(Math.max(0, W - r.length)).fill(''));
+  const rows = [];
+  const add = (...r) => rows.push(pad(r));
+
+  add('Freight GHG emissions, ' + sourceName);
+  add(report.statement || '');
+  add('Calculated', report.generated || '', 'Dataset', (report.datasets || []).join(', '));
+  add('');
+  add('Total', 'kg CO2e');
+  add('Well-to-wheel (all)', round_(t.wtw_kg, 1));
+  add('Transport, operational (TTW)', round_(t.ttw_kg, 1));
+  add('Transport, energy provision (WTT)', round_(t.wtt_kg, 1));
+  add('Hubs (WTW)', round_(t.hub_wtw_kg || 0, 1));
+  add('Tonne-km', round_(t.tonne_km, 1));
+  add('Intensity, g CO2e per tonne-km', round_(t.intensity_g_per_tkm, 2));
+  add('GHG Protocol scope 3 (for the shipper)', round_(g.scope3_shipper_kg, 1));
+  add('');
+  add('Coverage');
+  add('Shipments', c.shipments, 'Calculated', c.calculated, 'Failed', c.failed || 0);
+  add('Legs', c.legs, 'Hub stops', c.hub_stops || 0, 'Added road legs', c.added_road_legs || 0);
+  add('');
+  add('Mode', 'Legs', 'Tonne-km', 'TTW kg', 'WTT kg', 'WTW kg');
+  (report.modes || []).forEach((m) => add(m.mode, m.legs, round_(m.tonne_km, 1), round_(m.ttw_kg, 1),
+    round_(m.wtt_kg, 1), round_(m.wtw_kg, 1)));
+  if ((report.hubs || []).length) {
+    add('');
+    add('Hub type', 'Stops', 'Tonnes', 'WTW kg');
+    report.hubs.forEach((h) => add(h.hub_type, h.stops, round_(h.tonnes, 1), round_(h.wtw_kg, 1)));
+  }
+  add('');
+  add('Data quality', 'Share of WTW');
+  add('Primary data', round_(dq.primary_share, 3));
+  add('Modelled', round_(dq.modelled_share, 3));
+  add('Default values', round_(dq.default_share, 3));
+  (dq.default_sources || []).forEach((s) => add('Source: ' + s.source, round_(s.share, 3)));
+  if ((report.notes || []).length) {
+    add('');
+    add('Notes');
+    report.notes.forEach((n) => add(n));
+  }
+  fillSheet_(ss, SUMMARY_SHEET, rows);
+}
+
+/** Replaces a sheet's contents (creating the sheet when needed). */
+function fillSheet_(ss, name, rows) {
+  const sheet = ss.getSheetByName(name) || ss.insertSheet(name);
+  sheet.clear();
+  if (!rows.length) return;
+  sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  sheet.getRange(1, 1, 1, rows[0].length).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+}
+
+// ---- HTTP and helpers ----
+
+function baseUrl_() {
+  const u = PropertiesService.getUserProperties().getProperty(URL_PROP);
+  return (u || SOOTCASE_DEFAULT_URL).replace(/\/+$/, '');
+}
+
+function apiKey_() {
+  return PropertiesService.getUserProperties().getProperty(KEY_PROP) ||
+    PropertiesService.getDocumentProperties().getProperty(KEY_PROP) || '';
+}
+
+function headers_() {
+  const key = apiKey_();
+  return key ? { Authorization: 'Bearer ' + key } : {};
+}
+
+/** Calls the API and returns its JSON, or throws a readable error. */
+function request_(method, path, payload, contentType) {
+  const resp = UrlFetchApp.fetch(baseUrl_() + path, {
+    method: method,
+    contentType: contentType,
+    payload: payload,
+    headers: headers_(),
+    muteHttpExceptions: true,
+  });
+  return parse_(resp);
+}
+
+function parse_(resp) {
+  const code = resp.getResponseCode();
+  const text = resp.getContentText();
+  let body = {};
+  try {
+    body = JSON.parse(text);
+  } catch (e) {
+    body = { error: text.slice(0, 200) };
+  }
+  if (code >= 200 && code < 300) return body;
+  const msg = body.error || ('HTTP ' + code);
+  if (code === 401 || code === 403) {
+    throw new Error('Sootcase didn\'t accept the request (' + msg + '). Set your API key: Sootcase > Set my API key.');
+  }
+  if (code === 429) throw new Error('Sootcase quota reached (' + msg + '). Try again later.');
+  if (code === 503) throw new Error('Sootcase is busy or a routing service didn\'t answer. Try again in a minute.');
+  throw new Error('Sootcase: ' + msg);
+}
+
+function promptProperty_(props, prop, text) {
+  const ui = SpreadsheetApp.getUi();
+  const r = ui.prompt('Sootcase', text, ui.ButtonSet.OK_CANCEL);
+  if (r.getSelectedButton() !== ui.Button.OK) return;
+  const v = r.getResponseText().trim();
+  if (v) props.setProperty(prop, v);
+  else props.deleteProperty(prop);
+  SpreadsheetApp.getActiveSpreadsheet().toast(v ? 'Saved.' : 'Removed.', 'Sootcase', 3);
+}
+
+function csvCell_(v) {
+  let s;
+  if (v instanceof Date) s = Utilities.formatDate(v, 'UTC', 'yyyy-MM-dd');
+  else s = v === null || v === undefined ? '' : String(v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function digest_(s) {
+  return Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, s));
+}
+
+function blank_(v) {
+  return v === undefined || v === null || String(v).trim() === '';
+}
+
+function round_(v, d) {
+  if (typeof v !== 'number' || !isFinite(v)) return '';
+  const p = Math.pow(10, d);
+  return Math.round(v * p) / p;
+}

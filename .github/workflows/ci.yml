@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 5 * * 1" # weekly, to catch API changes in Sootcase
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out Sootcase
+        uses: actions/checkout@v4
+        with:
+          repository: majidkabir/Sootcase
+          path: sootcase
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: sootcase/go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Start a local Sootcase server
+        run: |
+          (cd sootcase && go build -o /tmp/sootcase ./cmd/sootcase)
+          /tmp/sootcase serve -addr :8080 > /tmp/sootcase.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:8080/healthz && break; sleep 1; done
+
+      - name: Syntax check
+        run: node --check src/Code.js
+
+      - name: Tests
+        run: node test/run.js
+        env:
+          SOOTCASE_TEST_URL: http://localhost:8080

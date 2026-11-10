@@ -84,6 +84,7 @@ function makeEnv() {
     getSheetByName: (n) => sheets.find((s) => s.name === n) || null,
     insertSheet: (n) => { const s = makeSheet(n); sheets.push(s); active = s; return s; },
     toast: (msg) => toasts.push(msg),
+    getSpreadsheetTimeZone: () => 'Europe/Copenhagen',
   };
   const ui = {
     ButtonSet: { OK: 'OK', OK_CANCEL: 'OK_CANCEL' },
@@ -100,17 +101,18 @@ function makeEnv() {
       DigestAlgorithm: { SHA_256: 'sha256' },
       computeDigest: (alg, s) => Array.from(crypto.createHash(alg).update(s).digest()),
       base64Encode: (bytes) => Buffer.from(bytes.map((b) => b & 255)).toString('base64'),
-      formatDate: (d) => d.toISOString().slice(0, 10),
+      formatDate: (d, tz) => new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(d),
     },
     SpreadsheetApp: { getActiveSpreadsheet: () => ss, getUi: () => ui },
   };
   vm.createContext(sandbox);
   const code = fs.readFileSync(path.join(__dirname, '..', 'src', 'Code.js'), 'utf8');
   // Top-level const/function declarations become reachable through this object.
-  vm.runInContext(code + '\n;globalThis.__api = { SOOTCASE, calculateSheet, insertTemplate, TEMPLATE_ROWS, placeInput_, legInput_ };', sandbox);
+  vm.runInContext(code + '\n;globalThis.__api = { SOOTCASE, calculateSheet, insertTemplate, TEMPLATE_ROWS, placeInput_, legInput_, csvCell_, countryKm_ };', sandbox);
 
   return {
     api: sandbox.__api,
+    run: (js) => vm.runInContext(js, sandbox),
     calls,
     cache,
     userProps,

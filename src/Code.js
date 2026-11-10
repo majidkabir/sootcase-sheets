@@ -153,11 +153,19 @@ function calculateSheet() {
   const tz = ss.getSpreadsheetTimeZone();
   const csv = [header].concat(rows).map((r) => r.map((v) => csvCell_(v, tz)).join(',')).join('\n');
   const q = 'results=true&title=' + encodeURIComponent(sheet.getName());
-  const report = request_('post', '/v1/report?' + q, csv, 'text/csv');
+  let report;
+  try {
+    report = request_('post', '/v1/report?' + q, csv, 'text/csv');
+  } catch (e) {
+    ss.toast('Not calculated.', 'Sootcase', 3); // replaces the "Calculating…" toast
+    ui.alert('Sootcase', e.message, ui.ButtonSet.OK);
+    return;
+  }
 
   writeResults_(ss, report);
   writeLegs_(ss, report);
   writeSummary_(ss, report, sheet.getName());
+  ss.setActiveSheet(ss.getSheetByName(RESULTS_SHEET));
 
   const c = report.coverage || {};
   ss.toast(c.calculated + ' calculated, ' + (c.failed || 0) + ' failed. Total ' +
@@ -193,8 +201,9 @@ function setApiKey() {
 }
 
 /**
- * Stores an API key with this spreadsheet. Use it when SOOTCASE() in cells doesn't see your own key;
- * anyone who can edit the spreadsheet's script can read it.
+ * Stores an API key with this spreadsheet. SOOTCASE() cells only get the spreadsheet owner's own
+ * settings (Google's rule for custom functions); without an owner's key they use this one. Anyone
+ * who can edit the spreadsheet's script can read it.
  */
 function setSpreadsheetApiKey() {
   promptProperty_(PropertiesService.getDocumentProperties(), KEY_PROP,
@@ -205,7 +214,7 @@ function setSpreadsheetApiKey() {
 function setServer() {
   promptProperty_(PropertiesService.getUserProperties(), URL_PROP,
     'Sootcase server URL, starting with https:// or http:// (now ' + baseUrl_() + '). Leave empty for ' +
-    SOOTCASE_DEFAULT_URL + '.', (v) => /^https?:\/\/[^\s/]+/.test(v));
+    SOOTCASE_DEFAULT_URL + '.', (v) => /^https?:\/\/[^\s/]+(\/\S*)?$/.test(v));
 }
 
 function about() {
@@ -256,7 +265,7 @@ function valueField_(value) {
 
 /**
  * A place as the API takes it: {code} for an upper-case UN/LOCODE or IATA code, {lat, lon} for
- * "lat,lon", or {name} to look up (resolved in calculateLegs_).
+ * "lat,lon", or {lookup} for a name to look up (resolved in calculateLegs_).
  */
 function placeInput_(v, which) {
   if (blank_(v)) throw new Error(which + ' is required');
@@ -318,8 +327,15 @@ function calculateLegs_(requests) {
   const store = {};
   resps.forEach((resp, n) => {
     const part = parts[n];
+    let body;
+    try {
+      body = parse_(resp);
+    } catch (e) {
+      part.forEach((q) => { q.error = e.message; }); // other chunks keep their answers
+      return;
+    }
     const byId = {};
-    (parse_(resp).results || []).forEach((item, j) => { byId[item.shipment_id || 'r' + j] = item; });
+    (body.results || []).forEach((item, j) => { byId[item.shipment_id || 'r' + j] = item; });
     part.forEach((q, j) => {
       const item = byId['r' + j];
       if (!item) q.error = 'no result from Sootcase';
@@ -369,7 +385,13 @@ function lookupPlaces_(names, cache) {
   const store = {};
   resps.forEach((resp, i) => {
     const n = missing[i];
-    const p = (parse_(resp).places || [])[0];
+    let p;
+    try {
+      p = (parse_(resp).places || [])[0];
+    } catch (e) {
+      out[n] = e.message; // only rows with this place fail
+      return;
+    }
     if (!p) {
       out[n] = 'no place found for "' + n + '": try a UN/LOCODE (DKCPH) or "lat,lon"';
       return;

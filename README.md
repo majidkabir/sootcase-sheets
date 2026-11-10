@@ -52,9 +52,9 @@ It writes three sheets:
 
 ## API key and server
 
-- **Set my API key…** stores the key for you only.
-- If `=SOOTCASE()` cells say the key is missing, Google isn't giving cell functions your own settings. Use **Set API key for this spreadsheet…** instead. Anyone who can edit the spreadsheet's script can read that key.
-- **Use another Sootcase server…** points the add-in at your own `sootcase serve` (e.g. `http://your-host:8080`).
+- **Set my API key…** stores the key for you only. The menu (calculating a sheet) uses it.
+- `=SOOTCASE()` cells only get the **spreadsheet owner's** settings ([Google's rule for cell functions](https://developers.google.com/apps-script/guides/sheets/functions)): they use the owner's key and server, whoever edits the sheet. If the owner has no key set, cells use the one from **Set API key for this spreadsheet…**; anyone who can edit the spreadsheet's script can read that key.
+- **Use another Sootcase server…** points the add-in at your own `sootcase serve` (e.g. `http://your-host:8080`), for you; for cells, the owner's setting counts.
 
 ## Development
 

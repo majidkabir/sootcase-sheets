@@ -57,6 +57,7 @@ function makeEnv() {
     const s = {
       name,
       values: values || [],
+      textCols: [],
       getName: () => s.name,
       getDataRange: () => ({ getValues: () => s.values.map((r) => r.slice()) }),
       clear: () => { s.values = []; },
@@ -69,6 +70,7 @@ function makeEnv() {
           v.forEach((r, i) => { s.values[row - 1 + i] = r.slice(); });
         },
         setFontWeight: () => {},
+        setNumberFormat: (f) => { if (f === '@') s.textCols.push(col); },
       }),
       setFrozenRows: () => {},
       autoResizeColumns: () => {},

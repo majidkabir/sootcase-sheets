@@ -32,7 +32,7 @@ With [clasp](https://github.com/google/clasp) instead: `cp .clasp.json.example .
 | `distance_km` | optional; otherwise Sootcase routes the leg (road, rail, sea and waterway networks; great-circle for air) |
 | `value` | optional: `wtw` (default), `ttw`, `wtt`, `tonne_km`, `intensity` (g CO2e per tonne-km), `distance_km` |
 
-Ranges are sent as one request (500 rows per request) and every answer is cached for 6 hours, so recalculating the sheet doesn't call the API again. A bad row shows `Error: …` in its cell; the rest still calculate.
+A range is sent in requests of 500 rows, all at once (a cell function gets 30 seconds), and every answer is cached for 6 hours, so recalculating the sheet doesn't call the API again. A bad row shows `Error: …` in its cell; the rest still calculate.
 
 Sootcase adds road legs where they're needed (to a port or airport, for example), so `distance_km` as a `value` is the whole trip.
 
@@ -46,8 +46,8 @@ For multi-leg shipments, hubs, measured fuel, loads or your own factors, use Soo
 
 It writes three sheets:
 
-- **Sootcase results**: per shipment, emissions (TTW, WTT, WTW, hubs), tonne-km, intensity, share of primary data, or why it failed.
-- **Sootcase legs**: per leg and hub, distance and how it was found, DAF, method, data type and the factor's source, so every number can be checked.
+- **Sootcase results**: per shipment, emissions (TTW, WTT, WTW, hubs), tonne-km, intensity, share of primary data, road legs Sootcase added, warnings (things that may make a result too low), or why it failed.
+- **Sootcase legs**: per leg and hub, distance and how it was found, km per country (routed legs), DAF, method, data type and the factor's source, so every number can be checked.
 - **Sootcase summary**: the ISO 14083-style report: totals, per mode, hubs, data quality with the default value sources, and notes.
 
 ## API key and server

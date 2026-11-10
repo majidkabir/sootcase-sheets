@@ -140,7 +140,8 @@ function calculateSheet() {
   }
 
   ss.toast('Calculating ' + ids.size + ' shipments…', 'Sootcase', -1);
-  const csv = [header].concat(rows).map((r) => r.map(csvCell_).join(',')).join('\n');
+  const tz = ss.getSpreadsheetTimeZone();
+  const csv = [header].concat(rows).map((r) => r.map((v) => csvCell_(v, tz)).join(',')).join('\n');
   const q = 'results=true&title=' + encodeURIComponent(sheet.getName());
   const report = request_('post', '/v1/report?' + q, csv, 'text/csv');
 
@@ -265,9 +266,9 @@ function calculateLegs_(requests) {
   const cache = CacheService.getScriptCache();
   const todo = requests.filter((q) => q && !q.error);
 
-  // Place names -> coordinates.
+  // Place names -> places.
   const names = [];
-  todo.forEach((q) => q.input.legs[0] && ['from', 'to'].forEach((k) => {
+  todo.forEach((q) => ['from', 'to'].forEach((k) => {
     const p = q.input.legs[0][k];
     if (p.lookup && names.indexOf(p.lookup) < 0) names.push(p.lookup);
   }));
@@ -282,30 +283,41 @@ function calculateLegs_(requests) {
     });
   });
 
-  // Shipments -> results, cached by their input.
+  // Shipments -> results, cached by server and input. All chunks go out at
+  // once: a cell function has 30 seconds.
   const pending = [];
   todo.filter((q) => !q.error).forEach((q) => {
-    q.key = 'calc:' + digest_(JSON.stringify(q.input));
+    q.key = 'calc:' + digest_(baseUrl_() + JSON.stringify(q.input));
     const hit = cache.get(q.key);
     if (hit) q.result = JSON.parse(hit);
     else pending.push(q);
   });
-  for (let i = 0; i < pending.length; i += CHUNK) {
-    const part = pending.slice(i, i + CHUNK);
-    const body = { shipments: part.map((q, j) => Object.assign({ id: 'r' + (i + j) }, q.input)) };
-    const res = request_('post', '/v1/calculate/batch', JSON.stringify(body), 'application/json');
-    const store = {};
-    (res.results || []).forEach((item, j) => {
-      const q = part[j];
-      if (item.error) {
-        q.error = item.error;
-        return;
+  const parts = [];
+  for (let i = 0; i < pending.length; i += CHUNK) parts.push(pending.slice(i, i + CHUNK));
+  const resps = UrlFetchApp.fetchAll(parts.map((part) => ({
+    url: baseUrl_() + '/v1/calculate/batch',
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify({ shipments: part.map((q, j) => Object.assign({ id: 'r' + j }, q.input)) }),
+    headers: headers_(),
+    muteHttpExceptions: true,
+  })));
+  const store = {};
+  resps.forEach((resp, n) => {
+    const part = parts[n];
+    const byId = {};
+    (parse_(resp).results || []).forEach((item, j) => { byId[item.shipment_id || 'r' + j] = item; });
+    part.forEach((q, j) => {
+      const item = byId['r' + j];
+      if (!item) q.error = 'no result from Sootcase';
+      else if (item.error) q.error = item.error + (item.retryable ? ' (try again)' : '');
+      else {
+        q.result = summary_(item.result);
+        store[q.key] = JSON.stringify(q.result);
       }
-      q.result = summary_(item.result);
-      store[q.key] = JSON.stringify(q.result);
     });
-    if (Object.keys(store).length) cache.putAll(store, CACHE_SECONDS);
-  }
+  });
+  if (Object.keys(store).length) cache.putAll(store, CACHE_SECONDS);
 }
 
 /** The numbers SOOTCASE() can return, from one API result. */
@@ -320,34 +332,36 @@ function summary_(r) {
   };
 }
 
-/** Looks up place names: name -> {name, lat, lon}, or an error message string. */
+/**
+ * Looks up place names: name -> the place as the API takes it ({code}, or {name, lat, lon}
+ * for a place without one), or an error message string.
+ */
 function lookupPlaces_(names, cache) {
   const out = {};
   const missing = [];
+  const key = (n) => 'place:' + digest_(baseUrl_() + '|' + n.toLowerCase());
   names.forEach((n) => {
-    const hit = cache.get('place:' + digest_(n.toLowerCase()));
+    const hit = cache.get(key(n));
     if (hit) out[n] = JSON.parse(hit);
     else missing.push(n);
   });
   if (!missing.length) return out;
-  const reqs = missing.map((n) => ({
+  const resps = UrlFetchApp.fetchAll(missing.map((n) => ({
     url: baseUrl_() + '/v1/places?limit=1&q=' + encodeURIComponent(n),
     method: 'get',
     headers: headers_(),
     muteHttpExceptions: true,
-  }));
-  const resps = UrlFetchApp.fetchAll(reqs);
+  })));
   const store = {};
   resps.forEach((resp, i) => {
     const n = missing[i];
-    const body = parse_(resp);
-    const p = (body.places || [])[0];
+    const p = (parse_(resp).places || [])[0];
     if (!p) {
       out[n] = 'no place found for "' + n + '": try a UN/LOCODE (DKCPH) or "lat,lon"';
       return;
     }
-    out[n] = { name: p.name + (p.country ? ', ' + p.country : ''), lat: p.lat, lon: p.lon };
-    store['place:' + digest_(n.toLowerCase())] = JSON.stringify(out[n]);
+    out[n] = p.code ? { code: p.code } : { name: p.name + (p.country ? ', ' + p.country : ''), lat: p.lat, lon: p.lon };
+    store[key(n)] = JSON.stringify(out[n]);
   });
   if (Object.keys(store).length) cache.putAll(store, CACHE_SECONDS);
   return out;
@@ -361,11 +375,12 @@ const SUMMARY_SHEET = 'Sootcase summary';
 
 function writeResults_(ss, report) {
   const rows = [['shipment_id', 'weight_kg', 'legs', 'distance_km', 'tonne_km', 'ttw_kg', 'wtt_kg',
-    'hub_wtw_kg', 'wtw_kg', 'intensity_g_per_tkm', 'primary_data_share', 'error']];
+    'hub_wtw_kg', 'wtw_kg', 'intensity_g_per_tkm', 'primary_data_share', 'added_road_legs', 'warnings', 'error']];
   (report.results || []).forEach((item) => {
     const r = item.result;
     if (!r) {
-      rows.push([item.shipment_id, '', '', '', '', '', '', '', '', '', '', item.error || 'not calculated']);
+      rows.push([item.shipment_id, '', '', '', '', '', '', '', '', '', '', '', '',
+        (item.error || 'not calculated') + (item.retryable ? ' (send again)' : '')]);
       return;
     }
     const legs = r.legs || [];
@@ -373,7 +388,8 @@ function writeResults_(ss, report) {
     rows.push([item.shipment_id, r.weight_kg, legs.length,
       round_(legs.reduce((s, l) => s + (l.distance_km || 0), 0), 1),
       round_(r.tonne_km, 1), round_(r.ttw_kg, 3), round_(r.wtt_kg, 3), round_(hubs, 3),
-      round_(r.wtw_kg, 3), round_(r.intensity_g_per_tkm, 2), round_(r.primary_data_share, 3), '']);
+      round_(r.wtw_kg, 3), round_(r.intensity_g_per_tkm, 2), round_(r.primary_data_share, 3),
+      legs.filter((l) => l.added).length, (r.warnings || []).join(' | '), '']);
   });
   fillSheet_(ss, RESULTS_SHEET, rows);
 }
@@ -381,7 +397,7 @@ function writeResults_(ss, report) {
 function writeLegs_(ss, report) {
   const rows = [['shipment_id', 'leg_id', 'mode', 'vehicle_type', 'factor_vehicle', 'distance_km',
     'distance_method', 'distance_type', 'daf', 'method', 'data_type', 'tonne_km', 'ttw_kg', 'wtt_kg',
-    'wtw_kg', 'intensity_g_per_tkm', 'factor_source', 'note']];
+    'wtw_kg', 'intensity_g_per_tkm', 'country_km', 'factor_source', 'note']];
   (report.results || []).forEach((item) => {
     const r = item.result;
     if (!r) return;
@@ -392,11 +408,13 @@ function writeLegs_(ss, report) {
       rows.push([item.shipment_id, l.leg_id || '', l.mode, l.vehicle_type, f.vehicle_type || '',
         round_(l.distance_km, 1), l.distance_method || '', l.distance_type || '', l.daf || '',
         l.method || '', l.data_type || '', round_(l.tonne_km, 1), round_(l.ttw_kg, 3),
-        round_(l.wtt_kg, 3), round_(l.wtw_kg, 3), round_(l.intensity_g_per_tkm, 2), f.source || '', note]);
+        round_(l.wtt_kg, 3), round_(l.wtw_kg, 3), round_(l.intensity_g_per_tkm, 2), countryKm_(l.country_km),
+        f.source || '', note]);
     });
     (r.hubs || []).forEach((h) => {
       rows.push([item.shipment_id, h.hub_id || '', 'hub', h.hub_type || '', '', '', '', '', '', '',
-        h.data_type || '', '', '', '', round_(h.wtw_kg, 3), '', h.source || '', h.note || '']);
+        h.data_type || '', '', round_(h.ttw_kg, 3), round_(h.wtt_kg, 3), round_(h.wtw_kg, 3), '', '',
+        h.source || '', h.note || '']);
     });
   });
   fillSheet_(ss, LEGS_SHEET, rows);
@@ -519,9 +537,15 @@ function promptProperty_(props, prop, text) {
   SpreadsheetApp.getActiveSpreadsheet().toast(v ? 'Saved.' : 'Removed.', 'Sootcase', 3);
 }
 
-function csvCell_(v) {
+/** "DE 210.4; DK 35.1", largest first. */
+function countryKm_(m) {
+  if (!m) return '';
+  return Object.keys(m).sort((a, b) => m[b] - m[a]).map((c) => c + ' ' + round_(m[c], 1)).join('; ');
+}
+
+function csvCell_(v, tz) {
   let s;
-  if (v instanceof Date) s = Utilities.formatDate(v, 'UTC', 'yyyy-MM-dd');
+  if (v instanceof Date) s = Utilities.formatDate(v, tz || 'UTC', 'yyyy-MM-dd');
   else s = v === null || v === undefined ? '' : String(v);
   return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }

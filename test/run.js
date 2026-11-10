@@ -121,6 +121,8 @@ test('calculate a sheet of shipments', () => {
   assert.ok(Math.abs(total[1] - expected) < 0.2, 'summary total ' + total[1] + ' vs ' + expected);
   assert.ok(sum.some((r) => r[0] === 'air'), 'per mode rows');
   assert.ok(/1 failed/.test(env.toasts[env.toasts.length - 1]));
+  assert.strictEqual(res[0].indexOf('warnings'), res[0].length - 2, 'warnings column before error');
+  assert.ok(legs[0].indexOf('country_km') > 0);
 });
 
 test('a sheet without Sootcase columns is refused', () => {
@@ -129,6 +131,30 @@ test('a sheet without Sootcase columns is refused', () => {
   env.api.calculateSheet();
   assert.ok(/shipment_id/.test(env.alerts[0]));
   assert.strictEqual(env.sheet('Sootcase results'), null);
+});
+
+test('CSV cells: dates in the spreadsheet time zone, quoting', () => {
+  const env = makeEnv();
+  // Midnight 1 March in Copenhagen is 28 February in UTC.
+  const d = env.run('new Date("2026-02-28T23:00:00Z")');
+  assert.strictEqual(env.api.csvCell_(d, 'Europe/Copenhagen'), '2026-03-01');
+  assert.strictEqual(env.api.csvCell_('a "b", c'), '"a ""b"", c"');
+  assert.strictEqual(env.api.csvCell_(null), '');
+  assert.strictEqual(env.api.csvCell_(0.5), '0.5');
+});
+
+test('km per country, largest first', () => {
+  const { api } = makeEnv();
+  assert.strictEqual(api.countryKm_({ DK: 35.14, DE: 210.44 }), 'DE 210.4; DK 35.1');
+  assert.strictEqual(api.countryKm_(undefined), '');
+});
+
+test('a place found by name is sent as its code', () => {
+  const env = makeEnv();
+  env.api.SOOTCASE('Hamburg', 'Rotterdam', 1, 'sea', '', 500);
+  const batch = env.calls.find((c) => /\/batch$/.test(c.url));
+  assert.ok(batch, 'batch call');
+  assert.ok(env.cache.data && Object.values(env.cache.data).some((v) => v === '{"code":"DEHAM"}'), 'cached as a code');
 });
 
 test('template sheet', () => {

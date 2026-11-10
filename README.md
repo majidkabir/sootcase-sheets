@@ -32,7 +32,7 @@ With [clasp](https://github.com/google/clasp) instead: `cp .clasp.json.example .
 | `distance_km` | optional; otherwise Sootcase routes the leg (road, rail, sea and waterway networks; great-circle for air) |
 | `value` | optional: `wtw` (default), `ttw`, `wtt`, `tonne_km`, `intensity` (g CO2e per tonne-km), `distance_km` |
 
-A range is sent in requests of 500 rows, all at once (a cell function gets 30 seconds), and every answer is cached for 6 hours, so recalculating the sheet doesn't call the API again. A bad row shows `Error: …` in its cell; the rest still calculate.
+A range is sent in requests of 500 rows, all at once (a cell function gets 30 seconds). Answers are cached for 6 hours, so recalculating the sheet doesn't call the API again; Google's cache keeps about 1,000 answers, so a bigger range is partly calculated again. A bad row shows `Error: …` in its cell; the rest still calculate.
 
 Sootcase adds road legs where they're needed (to a port or airport, for example), so `distance_km` as a `value` is the whole trip.
 

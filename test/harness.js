@@ -85,6 +85,7 @@ function makeEnv() {
   const alerts = [];
   const ss = {
     getActiveSheet: () => active,
+    setActiveSheet: (sh) => { active = sh; return sh; },
     getSheetByName: (n) => sheets.find((s) => s.name === n) || null,
     insertSheet: (n) => { const s = makeSheet(n); sheets.push(s); active = s; return s; },
     toast: (msg) => toasts.push(msg),
@@ -118,6 +119,8 @@ function makeEnv() {
 
   return {
     api: sandbox.__api,
+    sandbox,
+    active: () => active,
     run: (js) => vm.runInContext(js, sandbox),
     calls,
     cache,

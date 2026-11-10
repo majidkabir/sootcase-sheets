@@ -59,6 +59,19 @@ test('a large range goes out in 500-row chunks, every row answered in order', ()
   assert.strictEqual(env.calls.filter((c) => /\/batch$/.test(c.url)).length, 3);
 });
 
+test('one failing request fails only its own rows', () => {
+  const env = makeEnv();
+  const fetchAll = env.sandbox.UrlFetchApp.fetchAll;
+  let n = 0;
+  env.sandbox.UrlFetchApp.fetchAll = (reqs) => fetchAll(reqs).map((r) => (/batch$/.test(reqs[0].url) && n++ === 0
+    ? { getResponseCode: () => 429, getContentText: () => '{"error":"100000 shipments a day"}' } : r));
+  const col = (f) => Array.from({ length: 600 }, (_, i) => [f(i)]);
+  const out = env.api.SOOTCASE(col(() => 'CPH'), col(() => 'FRA'), col(() => 1), 'road', 'hgv', col(() => 100));
+  assert.ok(/quota reached/.test(out[0][0]), out[0][0]);
+  assert.ok(/quota reached/.test(out[499][0]));
+  near(out[500][0], 12.5, 'second chunk answered');
+});
+
 test('cached: the same cell again makes no requests', () => {
   const env = makeEnv();
   env.api.SOOTCASE('CPH', 'FRA', 1, 'air');
@@ -135,6 +148,23 @@ test('calculate a sheet of shipments', () => {
   assert.ok(/1 failed/.test(env.toasts[env.toasts.length - 1]));
   assert.strictEqual(res[0].indexOf('warnings'), res[0].length - 2, 'warnings column before error');
   assert.ok(legs[0].indexOf('country_km') > 0);
+});
+
+test('a failed sheet calculation says why and clears the progress toast', () => {
+  const env = makeEnv();
+  env.userProps.setProperty('SOOTCASE_URL', 'http://localhost:1'); // nothing listens
+  env.addSheet('Q3', [['shipment_id', 'weight_kg', 'mode', 'vehicle_type', 'distance_km'], ['A', 1000, 'road', 'hgv', 10]]);
+  env.api.calculateSheet(); // the curl stand-in throws on a refused connection, as UrlFetchApp does
+  assert.strictEqual(env.alerts.length, 1, 'one alert with the reason');
+  assert.strictEqual(env.toasts[env.toasts.length - 1], 'Not calculated.');
+  assert.strictEqual(env.sheet('Sootcase results'), null);
+});
+
+test('the results sheet is shown after a calculation', () => {
+  const env = makeEnv();
+  env.addSheet('Q4', [['shipment_id', 'weight_kg', 'mode', 'vehicle_type', 'distance_km'], ['A', 1000, 'road', 'hgv', 10]]);
+  env.api.calculateSheet();
+  assert.strictEqual(env.active().getName(), 'Sootcase results');
 });
 
 test('a row without shipment_id is refused with its row number', () => {

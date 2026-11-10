@@ -109,6 +109,8 @@ test('calculate a sheet of shipments', () => {
   assert.strictEqual(v('A1', 'legs'), 2);
   near(v('A3', 'hub_wtw_kg'), 710, 'A3 warehouse, 20 t x 35.5 kg/t');
   assert.ok(/not a number/.test(v('BAD', 'error')));
+  assert.ok(/line 8\b/.test(v('BAD', 'error')), 'line number is the sheet row: ' + v('BAD', 'error'));
+  assert.ok(env.sheet('Sootcase results').textCols.indexOf(1) >= 0, 'shipment_id column is plain text');
 
   const legs = env.sheet('Sootcase legs').values;
   assert.strictEqual(legs.length, 1 + 4 + 1, 'header + 4 legs + 1 hub');
@@ -123,6 +125,18 @@ test('calculate a sheet of shipments', () => {
   assert.ok(/1 failed/.test(env.toasts[env.toasts.length - 1]));
   assert.strictEqual(res[0].indexOf('warnings'), res[0].length - 2, 'warnings column before error');
   assert.ok(legs[0].indexOf('country_km') > 0);
+});
+
+test('a row without shipment_id is refused with its row number', () => {
+  const env = makeEnv();
+  env.addSheet('Q2', [
+    ['shipment_id', 'weight_kg', 'mode', 'vehicle_type', 'distance_km'],
+    ['A', 1000, 'road', 'hgv', 10],
+    ['', '', 'rail', 'freight_train', 20],
+  ]);
+  env.api.calculateSheet();
+  assert.ok(/Row 3 has no shipment_id/.test(env.alerts[0]), env.alerts[0]);
+  assert.strictEqual(env.sheet('Sootcase results'), null);
 });
 
 test('a sheet without Sootcase columns is refused', () => {

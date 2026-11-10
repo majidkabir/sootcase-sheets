@@ -126,9 +126,19 @@ function calculateSheet() {
       'Use Sootcase > Insert shipments template to start from an example.', ui.ButtonSet.OK);
     return;
   }
-  const rows = values.slice(1).filter((r) => r.some((v) => !blank_(v)));
+  // Empty rows stay in the CSV (Sootcase skips them) so the line numbers in its
+  // messages are the sheet's row numbers.
+  const rows = values.slice(1);
   const idCol = header.indexOf('shipment_id');
-  const ids = new Set(rows.map((r) => String(r[idCol])));
+  const ids = new Set();
+  for (let i = 0; i < rows.length; i++) {
+    if (!rows[i].some((v) => !blank_(v))) continue;
+    if (blank_(rows[i][idCol])) {
+      ui.alert('Sootcase', 'Row ' + (i + 2) + ' has no shipment_id. Every leg and hub row needs one.', ui.ButtonSet.OK);
+      return;
+    }
+    ids.add(String(rows[i][idCol]).trim());
+  }
   if (ids.size === 0) {
     ui.alert('Sootcase', 'There are no shipments below the header row.', ui.ButtonSet.OK);
     return;
@@ -391,7 +401,7 @@ function writeResults_(ss, report) {
       round_(r.wtw_kg, 3), round_(r.intensity_g_per_tkm, 2), round_(r.primary_data_share, 3),
       legs.filter((l) => l.added).length, (r.warnings || []).join(' | '), '']);
   });
-  fillSheet_(ss, RESULTS_SHEET, rows);
+  fillSheet_(ss, RESULTS_SHEET, rows, [0, 12, 13]);
 }
 
 function writeLegs_(ss, report) {
@@ -417,7 +427,7 @@ function writeLegs_(ss, report) {
         h.source || '', h.note || '']);
     });
   });
-  fillSheet_(ss, LEGS_SHEET, rows);
+  fillSheet_(ss, LEGS_SHEET, rows, [0, 1, 2, 3, 4, 6, 7, 9, 10, 16, 17, 18]);
 }
 
 function writeSummary_(ss, report, sourceName) {
@@ -466,14 +476,18 @@ function writeSummary_(ss, report, sourceName) {
     add('Notes');
     report.notes.forEach((n) => add(n));
   }
-  fillSheet_(ss, SUMMARY_SHEET, rows);
+  fillSheet_(ss, SUMMARY_SHEET, rows, [0]);
 }
 
-/** Replaces a sheet's contents (creating the sheet when needed). */
-function fillSheet_(ss, name, rows) {
+/**
+ * Replaces a sheet's contents (creating the sheet when needed). textCols (0-based) are set to
+ * plain text first, so IDs like 00123 keep their zeros and text starting with = isn't a formula.
+ */
+function fillSheet_(ss, name, rows, textCols) {
   const sheet = ss.getSheetByName(name) || ss.insertSheet(name);
   sheet.clear();
   if (!rows.length) return;
+  (textCols || []).forEach((c) => sheet.getRange(1, c + 1, rows.length, 1).setNumberFormat('@'));
   sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
   sheet.getRange(1, 1, 1, rows[0].length).setFontWeight('bold');
   sheet.setFrozenRows(1);
@@ -520,7 +534,8 @@ function parse_(resp) {
   if (code >= 200 && code < 300) return body;
   const msg = body.error || ('HTTP ' + code);
   if (code === 401 || code === 403) {
-    throw new Error('Sootcase didn\'t accept the request (' + msg + '). Set your API key: Sootcase > Set my API key.');
+    throw new Error('Sootcase didn\'t accept the request (' + msg + '). Set your API key in the Sootcase menu ' +
+      '(for =SOOTCASE() cells: Set API key for this spreadsheet).');
   }
   if (code === 429) throw new Error('Sootcase quota reached (' + msg + '). Try again later.');
   if (code === 503) throw new Error('Sootcase is busy or a routing service didn\'t answer. Try again in a minute.');

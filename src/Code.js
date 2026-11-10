@@ -204,7 +204,8 @@ function setSpreadsheetApiKey() {
 /** Points the add-in at another Sootcase server, e.g. your own `sootcase serve`. */
 function setServer() {
   promptProperty_(PropertiesService.getUserProperties(), URL_PROP,
-    'Sootcase server URL (now ' + baseUrl_() + '). Leave empty for ' + SOOTCASE_DEFAULT_URL + '.');
+    'Sootcase server URL, starting with https:// or http:// (now ' + baseUrl_() + '). Leave empty for ' +
+    SOOTCASE_DEFAULT_URL + '.', (v) => /^https?:\/\/[^\s/]+/.test(v));
 }
 
 function about() {
@@ -295,13 +296,15 @@ function calculateLegs_(requests) {
 
   // Shipments -> results, cached by server and input. All chunks go out at
   // once: a cell function has 30 seconds.
+  const ready = todo.filter((q) => !q.error);
+  ready.forEach((q) => { q.key = 'calc:' + digest_(baseUrl_() + JSON.stringify(q.input)); });
+  const hits = cacheGet_(cache, ready.map((q) => q.key));
   const pending = [];
-  todo.filter((q) => !q.error).forEach((q) => {
-    q.key = 'calc:' + digest_(baseUrl_() + JSON.stringify(q.input));
-    const hit = cache.get(q.key);
-    if (hit) q.result = JSON.parse(hit);
+  ready.forEach((q) => {
+    if (hits[q.key]) q.result = JSON.parse(hits[q.key]);
     else pending.push(q);
   });
+  if (!pending.length) return;
   const parts = [];
   for (let i = 0; i < pending.length; i += CHUNK) parts.push(pending.slice(i, i + CHUNK));
   const resps = UrlFetchApp.fetchAll(parts.map((part) => ({
@@ -327,7 +330,7 @@ function calculateLegs_(requests) {
       }
     });
   });
-  if (Object.keys(store).length) cache.putAll(store, CACHE_SECONDS);
+  cachePut_(cache, store);
 }
 
 /** The numbers SOOTCASE() can return, from one API result. */
@@ -350,8 +353,9 @@ function lookupPlaces_(names, cache) {
   const out = {};
   const missing = [];
   const key = (n) => 'place:' + digest_(baseUrl_() + '|' + n.toLowerCase());
+  const hits = cacheGet_(cache, names.map(key));
   names.forEach((n) => {
-    const hit = cache.get(key(n));
+    const hit = hits[key(n)];
     if (hit) out[n] = JSON.parse(hit);
     else missing.push(n);
   });
@@ -373,8 +377,25 @@ function lookupPlaces_(names, cache) {
     out[n] = p.code ? { code: p.code } : { name: p.name + (p.country ? ', ' + p.country : ''), lat: p.lat, lon: p.lon };
     store[key(n)] = JSON.stringify(out[n]);
   });
-  if (Object.keys(store).length) cache.putAll(store, CACHE_SECONDS);
+  cachePut_(cache, store);
   return out;
+}
+
+/**
+ * Reads many cache keys in one call (the cache keeps about 1,000 items, so a large range is
+ * only partly cached; that is fine, the rest is calculated again).
+ */
+function cacheGet_(cache, keys) {
+  return keys.length ? cache.getAll(keys) || {} : {};
+}
+
+function cachePut_(cache, store) {
+  const keys = Object.keys(store);
+  for (let i = 0; i < keys.length; i += 100) {
+    const part = {};
+    keys.slice(i, i + 100).forEach((k) => { part[k] = store[k]; });
+    cache.putAll(part, CACHE_SECONDS);
+  }
 }
 
 // ---- sheet output ----
@@ -542,11 +563,15 @@ function parse_(resp) {
   throw new Error('Sootcase: ' + msg);
 }
 
-function promptProperty_(props, prop, text) {
+function promptProperty_(props, prop, text, valid) {
   const ui = SpreadsheetApp.getUi();
   const r = ui.prompt('Sootcase', text, ui.ButtonSet.OK_CANCEL);
   if (r.getSelectedButton() !== ui.Button.OK) return;
   const v = r.getResponseText().trim();
+  if (v && valid && !valid(v)) {
+    ui.alert('Sootcase', '"' + v + '" isn\'t a valid value; nothing was changed.', ui.ButtonSet.OK);
+    return;
+  }
   if (v) props.setProperty(prop, v);
   else props.deleteProperty(prop);
   SpreadsheetApp.getActiveSpreadsheet().toast(v ? 'Saved.' : 'Removed.', 'Sootcase', 3);

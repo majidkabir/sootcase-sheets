@@ -48,6 +48,7 @@ function makeEnv() {
   const cacheData = {};
   const cache = {
     get: (k) => (k in cacheData ? cacheData[k] : null),
+    getAll: (keys) => { const o = {}; keys.forEach((k) => { if (k in cacheData) o[k] = cacheData[k]; }); return o; },
     putAll: (o) => Object.assign(cacheData, o),
     data: cacheData,
   };
@@ -80,6 +81,7 @@ function makeEnv() {
   const sheets = [];
   let active = null;
   const toasts = [];
+  const answers = [];
   const alerts = [];
   const ss = {
     getActiveSheet: () => active,
@@ -92,6 +94,8 @@ function makeEnv() {
     ButtonSet: { OK: 'OK', OK_CANCEL: 'OK_CANCEL' },
     Button: { OK: 'OK' },
     alert: (title, msg) => alerts.push(msg || title),
+    // Answers prompts from env.answers (button OK) in order.
+    prompt: () => ({ getSelectedButton: () => 'OK', getResponseText: () => answers.shift() }),
   };
 
   const sandbox = {
@@ -110,7 +114,7 @@ function makeEnv() {
   vm.createContext(sandbox);
   const code = fs.readFileSync(path.join(__dirname, '..', 'src', 'Code.js'), 'utf8');
   // Top-level const/function declarations become reachable through this object.
-  vm.runInContext(code + '\n;globalThis.__api = { SOOTCASE, calculateSheet, insertTemplate, TEMPLATE_ROWS, placeInput_, legInput_, csvCell_, countryKm_ };', sandbox);
+  vm.runInContext(code + '\n;globalThis.__api = { SOOTCASE, calculateSheet, insertTemplate, setServer, setApiKey, TEMPLATE_ROWS, placeInput_, legInput_, csvCell_, countryKm_ };', sandbox);
 
   return {
     api: sandbox.__api,
@@ -122,6 +126,7 @@ function makeEnv() {
     sheets,
     toasts,
     alerts,
+    answers,
     addSheet: (name, values) => { const s = makeSheet(name, values); sheets.push(s); active = s; return s; },
     sheet: (n) => ss.getSheetByName(n),
   };

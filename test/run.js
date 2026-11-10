@@ -49,6 +49,16 @@ test('ranges: one request, empty rows stay empty, bad rows show their error', ()
   assert.strictEqual(batches.length, 1, 'one batch request for the whole range');
 });
 
+test('a large range goes out in 500-row chunks, every row answered in order', () => {
+  const env = makeEnv();
+  const n = 1201;
+  const col = (f) => Array.from({ length: n }, (_, i) => [f(i)]);
+  const out = env.api.SOOTCASE(col(() => 'CPH'), col(() => 'FRA'), col((i) => 1 + i), 'road', 'hgv', col(() => 100));
+  assert.strictEqual(out.length, n);
+  out.forEach((r, i) => near(r[0], (1 + i) * 100 * 0.125, 'row ' + i)); // 125 g/tkm
+  assert.strictEqual(env.calls.filter((c) => /\/batch$/.test(c.url)).length, 3);
+});
+
 test('cached: the same cell again makes no requests', () => {
   const env = makeEnv();
   env.api.SOOTCASE('CPH', 'FRA', 1, 'air');
@@ -169,6 +179,19 @@ test('a place found by name is sent as its code', () => {
   const batch = env.calls.find((c) => /\/batch$/.test(c.url));
   assert.ok(batch, 'batch call');
   assert.ok(env.cache.data && Object.values(env.cache.data).some((v) => v === '{"code":"DEHAM"}'), 'cached as a code');
+});
+
+test('server URL must start with http(s)://; the API key is saved and removed', () => {
+  const env = makeEnv();
+  env.answers.push('sootcase.org');
+  env.api.setServer();
+  assert.ok(/isn't a valid value/.test(env.alerts[0]));
+  assert.strictEqual(env.userProps.getProperty('SOOTCASE_URL'), require('./harness').SERVER, 'unchanged');
+  env.answers.push('k-123', '');
+  env.api.setApiKey();
+  assert.strictEqual(env.userProps.getProperty('SOOTCASE_API_KEY'), 'k-123');
+  env.api.setApiKey();
+  assert.strictEqual(env.userProps.getProperty('SOOTCASE_API_KEY'), null);
 });
 
 test('template sheet', () => {

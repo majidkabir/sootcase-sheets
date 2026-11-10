@@ -111,20 +111,21 @@ test('API key is sent as a bearer token', () => {
 test('calculate a sheet of shipments', () => {
   const env = makeEnv();
   env.addSheet('Q1', [
-    ['shipment_id', 'weight_kg', 'leg_id', 'mode', 'vehicle_type', 'distance_km', 'from_code', 'to_code', 'hub_type'],
-    ['A1', 12000, 'l1', 'road', 'hgv', 332, '', '', ''],
-    ['A1', '', 'l2', 'sea', 'container_ship', 560, '', '', ''],
-    ['A2', 3500, 'l1', 'air', 'air_freight', '', 'CPH', 'FRA', ''],
-    ['A3', 20000, 'l1', 'rail', 'freight_train', 330, '', '', ''],
-    ['A3', '', 'h1', '', '', '', '', '', 'warehouse'],
-    ['', '', '', '', '', '', '', '', ''],
-    ['BAD', 'abc', 'l1', 'road', 'hgv', 10, '', '', ''],
+    ['shipment_id', 'weight_kg', 'leg_id', 'mode', 'vehicle_type', 'distance_km', 'from_code', 'to_code', 'hub_id', 'hub_type', 'fuel', 'fuel_amount'],
+    ['A1', 12000, 'l1', 'road', 'hgv', 332, '', '', '', '', '', ''],
+    ['A1', '', 'l2', 'sea', 'container_ship', 560, '', '', '', '', '', ''],
+    ['A2', 3500, 'l1', 'air', 'air_freight', '', 'CPH', 'FRA', '', '', '', ''],
+    ['A3', 20000, 'l1', 'rail', 'freight_train', 330, '', '', '', '', '', ''],
+    ['A3', '', '', '', '', '', '', '', 'h1', 'warehouse', '', ''],
+    ['', '', '', '', '', '', '', '', '', '', '', ''],
+    ['BAD', 'abc', 'l1', 'road', 'hgv', 10, '', '', '', '', '', ''],
+    ['F1', 12000, 'l1', 'road', 'hgv', 400, '', '', '', '', 'diesel', 140],
   ]);
   env.api.calculateSheet();
   assert.deepStrictEqual(env.alerts, []);
 
   const res = env.sheet('Sootcase results').values;
-  assert.strictEqual(res.length, 5, 'header + 4 shipments');
+  assert.strictEqual(res.length, 6, 'header + 5 shipments');
   const h = res[0];
   const row = (id) => res.find((r) => r[0] === id);
   const v = (id, col) => row(id)[h.indexOf(col)];
@@ -136,13 +137,17 @@ test('calculate a sheet of shipments', () => {
   assert.ok(env.sheet('Sootcase results').textCols.indexOf(1) >= 0, 'shipment_id column is plain text');
 
   const legs = env.sheet('Sootcase legs').values;
-  assert.strictEqual(legs.length, 1 + 4 + 1, 'header + 4 legs + 1 hub');
+  assert.strictEqual(legs.length, 1 + 5 + 1, 'header + 5 legs + 1 hub');
   assert.ok(legs.slice(1).every((r) => r.length === legs[0].length));
-  assert.ok(legs.some((r) => r[2] === 'hub' && r[3] === 'warehouse'));
+  assert.ok(legs.some((r) => r[2] === 'hub' && r[3] === 'warehouse' && r[1] === 'h1'), 'hub with its hub_id');
+  const fuelLeg = legs.find((r) => r[0] === 'F1');
+  const lh = legs[0];
+  assert.ok(/GLEC.*Module 1/.test(fuelLeg[lh.indexOf('factor_source')]), 'measured fuel names its fuel factor source');
+  assert.ok(/diesel/.test(fuelLeg[lh.indexOf('factor_vehicle')]));
 
   const sum = env.sheet('Sootcase summary').values;
   const total = sum.find((r) => r[0] === 'Well-to-wheel (all)');
-  const expected = 498 + 49.3248 + v('A2', 'wtw_kg') + v('A3', 'wtw_kg');
+  const expected = 498 + 49.3248 + v('A2', 'wtw_kg') + v('A3', 'wtw_kg') + v('F1', 'wtw_kg');
   assert.ok(Math.abs(total[1] - expected) < 0.2, 'summary total ' + total[1] + ' vs ' + expected);
   assert.ok(sum.some((r) => r[0] === 'air'), 'per mode rows');
   assert.ok(/1 failed/.test(env.toasts[env.toasts.length - 1]));

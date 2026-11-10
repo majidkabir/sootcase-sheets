@@ -186,12 +186,12 @@ function insertTemplate() {
 }
 
 const TEMPLATE_ROWS = [
-  ['shipment_id', 'weight_kg', 'leg_id', 'mode', 'vehicle_type', 'from_code', 'to_code', 'distance_km', 'hub_type'],
-  ['CPH-RTM-1', 12000, 'truck', 'road', 'hgv', 'DKCPH', 'DEHAM', '', ''],
-  ['CPH-RTM-1', '', 'feeder', 'sea', 'container_ship', 'DEHAM', 'NLRTM', '', ''],
-  ['CPH-FRA-AIR', 800, 'flight', 'air', 'air_freight', 'CPH', 'FRA', '', ''],
-  ['HAM-MIL-RAIL', 20000, 'train', 'rail', 'freight_train', 'DEHAM', 'ITMIL', '', ''],
-  ['HAM-MIL-RAIL', '', 'dc', '', '', '', '', '', 'warehouse'],
+  ['shipment_id', 'weight_kg', 'leg_id', 'mode', 'vehicle_type', 'from_code', 'to_code', 'distance_km', 'hub_id', 'hub_type'],
+  ['CPH-RTM-1', 12000, 'truck', 'road', 'hgv', 'DKCPH', 'DEHAM', '', '', ''],
+  ['CPH-RTM-1', '', 'feeder', 'sea', 'container_ship', 'DEHAM', 'NLRTM', '', '', ''],
+  ['CPH-FRA-AIR', 800, 'flight', 'air', 'air_freight', 'CPH', 'FRA', '', '', ''],
+  ['HAM-MIL-RAIL', 20000, 'train', 'rail', 'freight_train', 'DEHAM', 'ITMIL', '', '', ''],
+  ['HAM-MIL-RAIL', '', '', '', '', '', '', '', 'dc', 'warehouse'],
 ];
 
 /** Stores the user's own API key (from sootcase.org). */
@@ -456,13 +456,14 @@ function writeLegs_(ss, report) {
     if (!r) return;
     (r.legs || []).forEach((l) => {
       const f = l.factor || {};
+      const fuel = l.fuel_factor || {}; // measured fuel: the fuel's factor instead of a vehicle's
       const note = [l.added ? 'added road leg (' + l.added + ')' : '', l.note || '', l.factor_note || '']
         .filter(String).join(' ');
-      rows.push([item.shipment_id, l.leg_id || '', l.mode, l.vehicle_type, f.vehicle_type || '',
+      rows.push([item.shipment_id, l.leg_id || '', l.mode, l.vehicle_type, f.vehicle_type || fuel.fuel || '',
         round_(l.distance_km, 1), l.distance_method || '', l.distance_type || '', l.daf || '',
         l.method || '', l.data_type || '', round_(l.tonne_km, 1), round_(l.ttw_kg, 3),
         round_(l.wtt_kg, 3), round_(l.wtw_kg, 3), round_(l.intensity_g_per_tkm, 2), countryKm_(l.country_km),
-        f.source || '', note]);
+        f.source || fuel.source || '', note]);
     });
     (r.hubs || []).forEach((h) => {
       rows.push([item.shipment_id, h.hub_id || '', 'hub', h.hub_type || '', '', '', '', '', '', '',
